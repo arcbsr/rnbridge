@@ -1,0 +1,161 @@
+# Simple Dockerfile for RNBRIDGE LTD
+FROM node:18-alpine
+
+# Install system dependencies
+RUN apk add --no-cache \
+    postgresql \
+    postgresql-contrib \
+    nginx \
+    bash \
+    curl \
+    && rm -rf /var/cache/apk/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy frontend files
+COPY package*.json ./
+RUN npm ci
+
+# Copy frontend source and build
+COPY . .
+RUN npm run build
+
+# Copy backend files
+COPY backend/package*.json ./backend/
+WORKDIR /app/backend
+RUN npm ci
+
+# Copy backend source and build
+COPY backend/ .
+RUN npm run build
+
+# Go back to app root
+WORKDIR /app
+
+# Create data directories for persistence
+RUN mkdir -p /var/lib/postgresql/data \
+    && mkdir -p /app/logs \
+    && mkdir -p /app/uploads \
+    && chown -R postgres:postgres /var/lib/postgresql/data
+
+# Create startup script
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+echo "🚀 Starting RNBRIDGE LTD Application..."\n\
+\n\
+# Start PostgreSQL\n\
+echo "📊 Starting PostgreSQL..."\n\
+if [ ! -f /var/lib/postgresql/data/postgresql.conf ]; then\n\
+  echo "Initializing PostgreSQL database..."\n\
+  initdb -D /var/lib/postgresql/data\n\
+  echo "host all all 0.0.0.0/0 md5" >> /var/lib/postgresql/data/pg_hba.conf\n\
+  echo "listen_addresses = '\''*'\''" >> /var/lib/postgresql/data/postgresql.conf\n\
+fi\n\
+\n\
+pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/logfile start\n\
+\n\
+# Wait for PostgreSQL\n\
+echo "⏳ Waiting for PostgreSQL..."\n\
+until pg_isready -h localhost -p 5432; do\n\
+  echo "PostgreSQL not ready yet..."\n\
+  sleep 2\n\
+done\n\
+echo "✅ PostgreSQL is ready!"\n\
+\n\
+# Create database if it doesn'\''t exist\n\
+echo "🗄️  Setting up database..."\n\
+psql -h localhost -U postgres -c "CREATE DATABASE rnbridge_db;" 2>/dev/null || true\n\
+\n\
+# Start backend\n\
+echo "🔧 Starting backend server..."\n\
+cd /app/backend\n\
+npm start &\n\
+\n\
+# Wait for backend to be ready\n\
+echo "⏳ Waiting for backend..."\n\
+until curl -f http://localhost:5000/api/health >/dev/null 2>&1; do\n\
+  echo "Backend not ready yet..."\n\
+  sleep 2\n\
+done\n\
+echo "✅ Backend is ready!"\n\
+\n\
+# Configure nginx\n\
+echo "🌐 Configuring nginx..."\n\
+cat > /etc/nginx/http.d/default.conf << '\''EOF'\''\n\
+server {\n\
+    listen 80;\n\
+    server_name localhost;\n\
+    root /app/build;\n\
+    index index.html;\n\
+    \n\
+    # Security headers\n\
+    add_header X-Frame-Options "SAMEORIGIN" always;\n\
+    add_header X-XSS-Protection "1; mode=block" always;\n\
+    add_header X-Content-Type-Options "nosniff" always;\n\
+    \n\
+    # Health check\n\
+    location /health {\n\
+        return 200 "OK";\n\
+        add_header Content-Type text/plain;\n\
+    }\n\
+    \n\
+    # API proxy\n\
+    location /api {\n\
+        proxy_pass http://localhost:5000;\n\
+        proxy_http_version 1.1;\n\
+        proxy_set_header Host $host;\n\
+        proxy_set_header X-Real-IP $remote_addr;\n\
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
+        proxy_set_header X-Forwarded-Proto $scheme;\n\
+    }\n\
+    \n\
+    # Static files\n\
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {\n\
+        expires 1y;\n\
+        add_header Cache-Control "public, immutable";\n\
+    }\n\
+    \n\
+    # React Router support\n\
+    location / {\n\
+        try_files $uri $uri/ /index.html;\n\
+    }\n\
+}\n\
+EOF\n\
+\n\
+# Start nginx\n\
+echo "🌐 Starting nginx..."\n\
+nginx -g "daemon off;" &\n\
+\n\
+echo "🎉 RNBRIDGE LTD Application is running!"\n\
+echo "📱 Frontend: http://localhost:80"\n\
+echo "🔧 Backend API: http://localhost:5000"\n\
+echo "🗄️  Database: localhost:5432"\n\
+\n\
+# Wait for all processes\n\
+wait\n\
+' > /app/start.sh && chmod +x /app/start.sh
+
+# Set environment variables
+ENV NODE_ENV=production
+ENV PORT=5000
+ENV DB_HOST=localhost
+ENV DB_PORT=5432
+ENV DB_NAME=rnbridge_db
+ENV DB_USER=postgres
+ENV DB_PASSWORD=postgres
+ENV CORS_ORIGIN=http://localhost
+
+# Create volume mount points
+VOLUME ["/var/lib/postgresql/data", "/app/logs", "/app/uploads"]
+
+# Expose ports
+EXPOSE 80 5000 5432
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost/health || exit 1
+
+# Start the application
+CMD ["/app/start.sh"] 

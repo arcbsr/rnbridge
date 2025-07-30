@@ -1,0 +1,146 @@
+# Final Working Dockerfile for RNBRIDGE LTD
+FROM node:18-alpine
+
+# Install system dependencies
+RUN apk add --no-cache \
+    postgresql \
+    postgresql-contrib \
+    nginx \
+    bash \
+    curl \
+    && rm -rf /var/cache/apk/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy frontend files
+COPY package*.json ./
+RUN npm ci
+
+# Copy frontend source and build
+COPY . .
+RUN npm run build
+
+# Copy backend files
+COPY backend/package*.json ./backend/
+WORKDIR /app/backend
+RUN npm ci
+
+# Copy backend source
+COPY backend/ .
+
+# Go back to app root
+WORKDIR /app
+
+# Create data directories for persistence
+RUN mkdir -p /var/lib/postgresql/data \
+    && mkdir -p /app/logs \
+    && mkdir -p /app/uploads \
+    && chown -R postgres:postgres /var/lib/postgresql/data
+
+# Create startup script
+RUN echo '#!/bin/bash' > /app/start.sh && \
+    echo 'set -e' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo 'echo "🚀 Starting RNBRIDGE LTD Application..."' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Start PostgreSQL' >> /app/start.sh && \
+    echo 'echo "📊 Starting PostgreSQL..."' >> /app/start.sh && \
+    echo 'if [ ! -f /var/lib/postgresql/data/postgresql.conf ]; then' >> /app/start.sh && \
+    echo '  echo "Initializing PostgreSQL database..."' >> /app/start.sh && \
+    echo '  su postgres -c "initdb -D /var/lib/postgresql/data"' >> /app/start.sh && \
+    echo '  su postgres -c "echo \"host all all 0.0.0.0/0 md5\" >> /var/lib/postgresql/data/pg_hba.conf"' >> /app/start.sh && \
+    echo '  su postgres -c "echo \"listen_addresses = '\''*'\''\" >> /var/lib/postgresql/data/postgresql.conf"' >> /app/start.sh && \
+    echo 'fi' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo 'su postgres -c "pg_ctl -D /var/lib/postgresql/data -l /var/lib/postgresql/logfile start"' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Wait for PostgreSQL' >> /app/start.sh && \
+    echo 'echo "⏳ Waiting for PostgreSQL..."' >> /app/start.sh && \
+    echo 'until pg_isready -h localhost -p 5432; do' >> /app/start.sh && \
+    echo '  echo "PostgreSQL not ready yet..."' >> /app/start.sh && \
+    echo '  sleep 2' >> /app/start.sh && \
+    echo 'done' >> /app/start.sh && \
+    echo 'echo "✅ PostgreSQL is ready!"' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Create database if it does not exist' >> /app/start.sh && \
+    echo 'echo "🗄️  Setting up database..."' >> /app/start.sh && \
+    echo 'su postgres -c "psql -h localhost -U postgres -c \"CREATE DATABASE rnbridge_db;\" 2>/dev/null || true"' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Start backend with ts-node' >> /app/start.sh && \
+    echo 'echo "🔧 Starting backend server..."' >> /app/start.sh && \
+    echo 'cd /app/backend' >> /app/start.sh && \
+    echo 'npx ts-node src/server.ts &' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Wait for backend to be ready' >> /app/start.sh && \
+    echo 'echo "⏳ Waiting for backend..."' >> /app/start.sh && \
+    echo 'until curl -f http://localhost:5000/api/health >/dev/null 2>&1; do' >> /app/start.sh && \
+    echo '  echo "Backend not ready yet..."' >> /app/start.sh && \
+    echo '  sleep 2' >> /app/start.sh && \
+    echo 'done' >> /app/start.sh && \
+    echo 'echo "✅ Backend is ready!"' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Configure nginx' >> /app/start.sh && \
+    echo 'echo "🌐 Configuring nginx..."' >> /app/start.sh && \
+    echo 'cat > /etc/nginx/http.d/default.conf << EOF' >> /app/start.sh && \
+    echo 'server {' >> /app/start.sh && \
+    echo '    listen 80;' >> /app/start.sh && \
+    echo '    server_name localhost;' >> /app/start.sh && \
+    echo '    root /app/build;' >> /app/start.sh && \
+    echo '    index index.html;' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '    location /health {' >> /app/start.sh && \
+    echo '        return 200 "OK";' >> /app/start.sh && \
+    echo '        add_header Content-Type text/plain;' >> /app/start.sh && \
+    echo '    }' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '    location /api {' >> /app/start.sh && \
+    echo '        proxy_pass http://localhost:5000;' >> /app/start.sh && \
+    echo '        proxy_http_version 1.1;' >> /app/start.sh && \
+    echo '        proxy_set_header Host \$host;' >> /app/start.sh && \
+    echo '        proxy_set_header X-Real-IP \$remote_addr;' >> /app/start.sh && \
+    echo '        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;' >> /app/start.sh && \
+    echo '        proxy_set_header X-Forwarded-Proto \$scheme;' >> /app/start.sh && \
+    echo '    }' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '    location / {' >> /app/start.sh && \
+    echo '        try_files \$uri \$uri/ /index.html;' >> /app/start.sh && \
+    echo '    }' >> /app/start.sh && \
+    echo '}' >> /app/start.sh && \
+    echo 'EOF' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Start nginx' >> /app/start.sh && \
+    echo 'echo "🌐 Starting nginx..."' >> /app/start.sh && \
+    echo 'nginx -g "daemon off;" &' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo 'echo "🎉 RNBRIDGE LTD Application is running!"' >> /app/start.sh && \
+    echo 'echo "📱 Frontend: http://localhost:80"' >> /app/start.sh && \
+    echo 'echo "🔧 Backend API: http://localhost:5000"' >> /app/start.sh && \
+    echo 'echo "🗄️  Database: localhost:5432"' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Wait for all processes' >> /app/start.sh && \
+    echo 'wait' >> /app/start.sh && \
+    chmod +x /app/start.sh
+
+# Set environment variables
+ENV NODE_ENV=production
+ENV PORT=5000
+ENV DB_HOST=localhost
+ENV DB_PORT=5432
+ENV DB_NAME=rnbridge_db
+ENV DB_USER=postgres
+ENV DB_PASSWORD=postgres
+ENV CORS_ORIGIN=http://localhost
+
+# Create volume mount points
+VOLUME ["/var/lib/postgresql/data", "/app/logs", "/app/uploads"]
+
+# Expose ports
+EXPOSE 80 5000 5432
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost/health || exit 1
+
+# Start the application
+CMD ["/app/start.sh"] 
